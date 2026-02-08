@@ -1,18 +1,12 @@
 import json
 import time
 import os
-import requests
 from datetime import datetime
 from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable
-from dotenv import load_dotenv
+import yfinance as yf
 
-load_dotenv()
-
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST")
-
-SYMBOLS = ["RELIANCE", "TCS", "INFY", "HDFCBANK"]
+SYMBOLS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"]
 
 def create_producer():
     """Create Kafka producer with retry logic"""
@@ -39,53 +33,51 @@ def create_producer():
             else:
                 print("\n❌ Failed to connect. Troubleshoot:")
                 print("   1. Check if Docker is running: docker ps")
-                print("   2. Check Kafka logs: docker logs <container_id>")
+                print("   2. Check Kafka logs: docker logs kafka")
                 print("   3. Verify port 9092 is exposed")
                 raise
 
 def get_stock_price(symbol):
-    """Fetch stock price from API"""
+    """Fetch stock price from yfinance (free API)"""
     try:
-        url = "https://indian-stock-exchange-api2.p.rapidapi.com/stock"
-        headers = {
-            "X-RapidAPI-Key": RAPIDAPI_KEY,
-            "X-RapidAPI-Host": RAPIDAPI_HOST
-        }
-        params = {"symbol": symbol}
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period='1d')
         
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        
-        if response.status_code != 200:
-            print(f"⚠️  API Error for {symbol}: Status {response.status_code}")
+        if data.empty:
+            print(f"⚠️  No data found for {symbol}")
             return None
         
-        data = response.json()
-        price = float(data.get("currentPrice"))
+        price = float(data['Close'].iloc[-1])
         return price
         
-    except requests.exceptions.RequestException as e:
-        print(f"⚠️  Request error for {symbol}: {e}")
-        return None
-    except (KeyError, ValueError, TypeError) as e:
-        print(f"⚠️  Data parsing error for {symbol}: {e}")
+    except Exception as e:
+        print(f"⚠️  Error fetching {symbol}: {e}")
         return None
 
 def main():
     """Main producer loop"""
     producer = create_producer()
+    cycle_count = 0
     
     try:
         while True:
+            cycle_count += 1
+            print(f"\n📍 Cycle {cycle_count} - Fetching stock prices...")
+            
             for symbol in SYMBOLS:
                 try:
                     price = get_stock_price(symbol)
                     
                     if price is None:
                         print(f"⏭️  Skipping {symbol} - no price data")
+                        time.sleep(2)
                         continue
                     
+                    # Extract symbol name for display
+                    display_symbol = symbol.split('.')[0]
+                    
                     event = {
-                        "symbol": symbol,
+                        "symbol": display_symbol,
                         "price": price,
                         "timestamp": datetime.utcnow().isoformat()
                     }
@@ -94,7 +86,7 @@ def main():
                     future = producer.send("stock_events", value=event)
                     record_metadata = future.get(timeout=10)
                     
-                    print(f"📤 PRICE SENT: {event['symbol']} = ₹{event['price']} | Partition: {record_metadata.partition}")
+                    print(f"📤 PRICE SENT: {event['symbol']} = ₹{event['price']:.2f} | Partition: {record_metadata.partition}")
                     
                 except KafkaError as e:
                     print(f"❌ Kafka Error: {e}")
@@ -103,7 +95,11 @@ def main():
                     print(f"❌ Unexpected error for {symbol}: {e}")
                     continue
                 
-                time.sleep(10)
+                time.sleep(2)
+            
+            # Delay before next cycle
+            print("⏳ Waiting 60 seconds before next cycle...")
+            time.sleep(60)
     
     except KeyboardInterrupt:
         print("\n🛑 Shutting down gracefully...")
